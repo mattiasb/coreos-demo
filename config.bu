@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright 2022, Mattias Bengtsson <mattias.jc.bengtsson@gmail.com>
+---
+variant: fcos
+version: 1.5.0
+
+passwd:
+  users:
+    - name: root
+      ssh_authorized_keys_local:
+        - id_rsa.pub
+    - name: grafana
+      uid: 472
+    - name: mattiasb
+      groups:
+        - wheel
+      ssh_authorized_keys_local:
+        - id_rsa.pub
+
+storage:
+  directories:
+    - &directory
+      path: /etc/grafana
+      user:
+        name: grafana
+    - <<: *directory
+      path: /etc/grafana/provisioning
+    - <<: *directory
+      path: /etc/grafana/provisioning/datasources
+    - <<: *directory
+      path: /etc/grafana/provisioning/dashboards
+
+  files:
+    - path: /etc/vconsole.conf
+      contents:
+        inline: |
+          KEYMAP=se
+          FONT=eurlatgr
+
+    - path: /etc/issue.d/ip.issue
+      contents:
+        inline: |
+
+          IP: \4
+
+    - path: /etc/hostname
+      contents:
+        inline: |
+          coreos-demo
+
+    - path: /etc/sudoers.d/lecture
+      contents:
+        inline: |
+          Defaults lecture = never
+
+    - path: /etc/containers/systemd/apps.network
+      contents:
+        inline: |
+          [Network]
+          Subnet=192.168.100.0/24
+          Gateway=192.168.100.1
+
+    - &volume
+      path: /etc/containers/systemd/grafana-state.volume
+      contents:
+        inline: |
+          [Volume]
+          User=grafana
+          Group=grafana
+
+    - path: /etc/containers/systemd/grafana.container
+      contents:
+        inline: |
+          [Unit]
+          Description=Grafana
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Restart=on-failure
+
+          [Container]
+          Image=docker.io/grafana/grafana:latest
+          ContainerName=grafana
+          UserNS=keep-id:uid=472,gid=472
+          User=472
+          Network=apps.network
+          Volume=/etc/grafana/provisioning:/etc/grafana/provisioning:Z
+          Volume=grafana-state:/var/lib/grafana
+          Label=io.containers.autoupdate=registry
+
+          [Install]
+          WantedBy=default.target
+
+    - path: /etc/containers/systemd/nginx.container
+      contents:
+        inline: |
+          [Unit]
+          Description=NGINX
+          Wants=network-online.target
+          After=grafana.service
+
+          [Service]
+          Restart=on-failure
+
+          [Container]
+          Image=docker.io/library/nginx:stable-alpine
+          ContainerName=nginx
+          Network=apps.network
+          Volume=/etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+          PublishPort=80:80
+          Label=io.containers.autoupdate=registry
+
+          [Install]
+          WantedBy=default.target
+
+    - path: /etc/nginx/nginx.conf
+      contents:
+        inline: |
+          user                          nginx;
+          worker_processes              auto;
+
+          error_log                     stderr notice;
+          pid                           /var/run/nginx.pid;
+
+          events {
+              worker_connections        1024;
+          }
+
+          http {
+              include                   /etc/nginx/mime.types;
+              default_type              application/octet-stream;
+
+              log_format                main '$remote_addr → "$request" '
+                                             '$remote_addr ← $status'
+                                             '$body_bytes_sent';
+
+              access_log                stdout  main;
+
+              sendfile                  on;
+              keepalive_timeout         65;
+
+              upstream grafana {
+                  server                grafana:3000;
+              }
+
+              server {
+                  listen                80;
+                  server_name           coreos.lan;
+                  location / {
+                      root              /usr/share/nginx/html;
+                      index             index.html;
+                  }
+              }
+
+              server {
+                  listen                80;
+                  server_name           grafana.lan;
+                  location / {
+                      proxy_pass        http://grafana/;
+
+                      proxy_set_header  Host                $http_host;
+                      proxy_set_header  X-Real-IP           $remote_addr;
+                      proxy_set_header  X-Forwarded-Proto   $scheme;
+                      proxy_set_header  X-Forwarded-For
+                                        $proxy_add_x_forwarded_for;
+                  }
+              }
+          }
+
+systemd:
+  units:
+    - name: podman-auto-update.timer
+      enabled: true
+    - name: nginx.service
+      enabled: true
+    - name: grafana.service
+      enabled: true
